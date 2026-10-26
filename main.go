@@ -132,9 +132,10 @@ func optionalAuth(next http.Handler) http.Handler {
 
 func corsMiddleware(next http.Handler) http.Handler {
 	allowedOrigins := map[string]bool{
-		"http://localhost:5173": true,
-		"http://127.0.0.1:5173": true,
-	}
+    "http://localhost:5173": true,
+    "http://127.0.0.1:5173": true,
+    "http://mini-shop-frontend-roshan-2026.s3-website.ap-south-1.amazonaws.com": true,
+}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
