@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -34,20 +35,32 @@ func NewProductHandler(
 }
 
 type productRequest struct {
-	ShopID int64   `json:"shop_id"`
-	Name   string  `json:"name"`
-	Stock  int     `json:"stock"`
-	Price  float64 `json:"price"`
-	Color  string  `json:"color"`
-	Size   string  `json:"size"`
+	ShopID int64    `json:"shop_id"`
+	Name   string   `json:"name"`
+	Stock  int      `json:"stock"`
+	Price  *float64 `json:"price"`
+	Color  string   `json:"color"`
+	Size   string   `json:"size"`
 }
 
 func (h *ProductHandler) CreateProduct(w http.ResponseWriter, r *http.Request) {
 	var req productRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		message := "Invalid JSON"
+
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(err, &typeErr) {
+			switch typeErr.Field {
+			case "price":
+				message = "Price must be a valid number"
+			case "stock":
+				message = "Stock must be a whole number"
+			}
+		}
+
 		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "Invalid JSON",
+			"error": message,
 		})
 		return
 	}
@@ -93,7 +106,7 @@ func (h *ProductHandler) CreateProduct(w http.ResponseWriter, r *http.Request) {
 		req.ShopID,
 		req.Name,
 		req.Stock,
-		req.Price,
+		*req.Price,
 		req.Color,
 		req.Size,
 	)
@@ -127,7 +140,7 @@ func (h *ProductHandler) UpdateProduct(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "Authentication required"})
 		return
 	}
-	product, updated, err := h.Products.UpdateByOwner(r.Context(), productID, claims.UserID, strings.TrimSpace(req.Name), req.Stock, req.Price, strings.TrimSpace(req.Color), strings.TrimSpace(req.Size))
+	product, updated, err := h.Products.UpdateByOwner(r.Context(), productID, claims.UserID, strings.TrimSpace(req.Name), req.Stock, *req.Price, strings.TrimSpace(req.Color), strings.TrimSpace(req.Size))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Could not update product"})
 		return
@@ -170,8 +183,14 @@ func validateProduct(req productRequest) error {
 	if req.Stock < 0 {
 		return fmt.Errorf("Stock must be a whole number greater than or equal to 0")
 	}
-	if req.Price < 0 {
-		return fmt.Errorf("Price must be greater than or equal to 0")
+	if req.Price == nil {
+		return fmt.Errorf("Price is required")
+	}
+	if strings.ContainsAny(req.Name, "<>") {
+		return fmt.Errorf("Product name cannot contain HTML tags")
+	}
+	if *req.Price < 0 || *req.Price > 1000000 {
+		return fmt.Errorf("Price must be greater than or equal to 0 and less than or equal to 1000000")
 	}
 	if len(strings.TrimSpace(req.Color)) > 30 || len(strings.TrimSpace(req.Size)) > 30 {
 		return fmt.Errorf("Colour and size must be at most 30 characters")

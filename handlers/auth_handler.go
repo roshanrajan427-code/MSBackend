@@ -38,7 +38,7 @@ func (h *AuthHandler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Mobile = strings.TrimSpace(req.Mobile)
 	if !validMobile(req.Mobile) || req.OTP != "0000" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Enter a valid mobile number and OTP"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Enter a valid OTP(0000)"})
 		return
 	}
 
