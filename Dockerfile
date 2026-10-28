@@ -15,6 +15,7 @@ WORKDIR /app
 
 COPY --from=builder /app/mini-shop-backend .
 COPY uploads/ ./uploads/
+COPY migrations/ ./migrations/
 
 EXPOSE 8080
 
