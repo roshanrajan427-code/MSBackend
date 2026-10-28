@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -9,19 +11,23 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"mini-shop-backend/auth"
 	"mini-shop-backend/repository"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 type ProductHandler struct {
 	Products  *repository.ProductRepository
 	Shops     *repository.ShopRepository
 	UploadDir string
+	S3Client  *s3.Client
+	S3Bucket  string
 }
 
 func NewProductHandler(
@@ -32,6 +38,32 @@ func NewProductHandler(
 		Products: products,
 		Shops:    shops,
 	}
+}
+func (h *ProductHandler) presignProductImage(
+	ctx context.Context,
+	objectKey string,
+) (string, error) {
+	if objectKey == "" {
+		return "", nil
+	}
+
+	presigner := s3.NewPresignClient(h.S3Client)
+
+	result, err := presigner.PresignGetObject(
+		ctx,
+		&s3.GetObjectInput{
+			Bucket: aws.String(h.S3Bucket),
+			Key:    aws.String(objectKey),
+		},
+		func(opts *s3.PresignOptions) {
+			opts.Expires = 15 * time.Minute
+		},
+	)
+	if err != nil {
+		return "", err
+	}
+
+	return result.URL, nil
 }
 
 type productRequest struct {
@@ -218,7 +250,8 @@ func (h *ProductHandler) UploadProductImage(w http.ResponseWriter, r *http.Reque
 	defer file.Close()
 	if err := h.saveProductImage(w, r, file, header, productID, claims.UserID); err != nil {
 		status := http.StatusBadRequest
-		if strings.HasPrefix(err.Error(), "database:") {
+		if strings.HasPrefix(err.Error(), "database:") ||
+			strings.HasPrefix(err.Error(), "storage:") {
 			status = http.StatusInternalServerError
 		}
 		writeJSON(w, status, map[string]string{"error": strings.TrimPrefix(err.Error(), "database:")})
@@ -226,41 +259,90 @@ func (h *ProductHandler) UploadProductImage(w http.ResponseWriter, r *http.Reque
 	}
 }
 
-func (h *ProductHandler) saveProductImage(w http.ResponseWriter, r *http.Request, file multipart.File, header *multipart.FileHeader, productID, ownerID int64) error {
+func (h *ProductHandler) saveProductImage(
+	w http.ResponseWriter,
+	r *http.Request,
+	file multipart.File,
+	header *multipart.FileHeader,
+	productID, ownerID int64,
+) error {
 	if header.Size > 5<<20 {
 		return fmt.Errorf("Image must be 5 MB or smaller")
 	}
+
 	data, err := io.ReadAll(io.LimitReader(file, (5<<20)+1))
 	if err != nil || len(data) > 5<<20 {
 		return fmt.Errorf("Image must be 5 MB or smaller")
 	}
+
 	mimeType := http.DetectContentType(data)
-	extensions := map[string]string{"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif"}
+	extensions := map[string]string{
+		"image/jpeg": ".jpg",
+		"image/png":  ".png",
+		"image/webp": ".webp",
+		"image/gif":  ".gif",
+	}
+
 	extension, valid := extensions[mimeType]
 	if !valid {
 		return fmt.Errorf("Use a JPEG, PNG, WebP, or GIF image")
 	}
-	if err := os.MkdirAll(h.UploadDir, 0755); err != nil {
-		return fmt.Errorf("Could not save image")
+
+	if h.S3Client == nil || h.S3Bucket == "" {
+		return fmt.Errorf("storage: S3 is not configured")
 	}
-	randomName := make([]byte, 16)
-	if _, err := rand.Read(randomName); err != nil {
-		return fmt.Errorf("Could not save image")
+	owns, err := h.Products.OwnsProduct(
+		r.Context(),
+		productID,
+		ownerID,
+	)
+	if err != nil {
+		return fmt.Errorf("database: Could not verify product ownership")
 	}
-	filename := hex.EncodeToString(randomName) + extension
-	if err := os.WriteFile(filepath.Join(h.UploadDir, filename), data, 0644); err != nil {
-		return fmt.Errorf("Could not save image")
-	}
-	imageURL := "/uploads/" + filename
-	product, updated, err := h.Products.SetImageByOwner(r.Context(), productID, ownerID, imageURL)
-	if err != nil || !updated {
-		_ = os.Remove(filepath.Join(h.UploadDir, filename))
-		if err != nil {
-			return fmt.Errorf("database: Could not update image")
-		}
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Product not found or you do not own its shop"})
+	if !owns {
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": "Product not found or you do not own its shop",
+		})
 		return nil
 	}
+
+	randomName := make([]byte, 16)
+	if _, err := rand.Read(randomName); err != nil {
+		return fmt.Errorf("Could not generate image filename")
+	}
+
+	filename := hex.EncodeToString(randomName) + extension
+	objectKey := "products/" + filename
+
+	_, err = h.S3Client.PutObject(r.Context(), &s3.PutObjectInput{
+		Bucket:      &h.S3Bucket,
+		Key:         &objectKey,
+		Body:        bytes.NewReader(data),
+		ContentType: &mimeType,
+	})
+	if err != nil {
+		return fmt.Errorf("storage: Could not upload image to S3")
+	}
+
+	// Store the S3 object key in PostgreSQL.
+	product, updated, err := h.Products.SetImageByOwner(
+		r.Context(),
+		productID,
+		ownerID,
+		objectKey,
+	)
+	if err != nil {
+		// The S3 upload succeeded, but the database update failed.
+		return fmt.Errorf("database: Could not update image")
+	}
+
+	if !updated {
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": "Product not found or you do not own its shop",
+		})
+		return nil
+	}
+
 	writeJSON(w, http.StatusOK, product)
 	return nil
 }
@@ -283,6 +365,30 @@ func (h *ProductHandler) GetProductsByShop(
 			"error": "Could not retrieve products",
 		})
 		return
+	}
+
+	for i := range products {
+		if products[i].ImageURL == "" {
+			continue
+		}
+
+		// Existing local-upload paths remain unchanged.
+		if strings.HasPrefix(products[i].ImageURL, "/uploads/") {
+			continue
+		}
+
+		imageURL, err := h.presignProductImage(
+			r.Context(),
+			products[i].ImageURL,
+		)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "Could not generate product image URL",
+			})
+			return
+		}
+
+		products[i].ImageURL = imageURL
 	}
 
 	writeJSON(w, http.StatusOK, products)

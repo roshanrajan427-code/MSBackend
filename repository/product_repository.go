@@ -150,3 +150,25 @@ func (r *ProductRepository) DeleteByOwner(ctx context.Context, productID, ownerI
 	}
 	return result.RowsAffected() > 0, nil
 }
+
+func (r *ProductRepository) OwnsProduct(
+	ctx context.Context,
+	productID, ownerID int64,
+) (bool, error) {
+	var owns bool
+
+	err := r.DB.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM products p
+			JOIN shops s ON p.shop_id = s.id
+			WHERE p.id = $1 AND s.owner_id = $2
+		)
+	`, productID, ownerID).Scan(&owns)
+
+	if err != nil {
+		return false, err
+	}
+
+	return owns, nil
+}

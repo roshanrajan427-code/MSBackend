@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
 	"os"
+
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/joho/godotenv"
 
@@ -17,6 +21,20 @@ import (
 func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found; using environment variables")
+	}
+	cfg, err := awsconfig.LoadDefaultConfig(
+		context.Background(),
+		awsconfig.WithRegion(os.Getenv("AWS_REGION")),
+	)
+	if err != nil {
+		log.Fatal("Failed to load AWS configuration: ", err)
+	}
+
+	s3Client := s3.NewFromConfig(cfg)
+	s3Bucket := os.Getenv("S3_BUCKET")
+
+	if s3Bucket == "" {
+		log.Fatal("S3_BUCKET is not configured")
 	}
 
 	db, err := database.Connect()
@@ -34,6 +52,8 @@ func main() {
 
 	productRepo := repository.NewProductRepository(db)
 	productHandler := handlers.NewProductHandler(productRepo, shopRepo)
+	productHandler.S3Client = s3Client
+	productHandler.S3Bucket = s3Bucket
 	productHandler.UploadDir = "uploads"
 	orderRepo := repository.NewOrderRepository(db)
 	orderHandler := handlers.NewOrderHandler(orderRepo)
