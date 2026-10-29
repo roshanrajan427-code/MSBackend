@@ -1,4 +1,3 @@
-
 name: Mini-Shop Backend CI/CD
 
 on:
@@ -92,10 +91,15 @@ jobs:
                 --env-file /home/ubuntu/MSBackend/.env \
                 628100075145.dkr.ecr.ap-south-1.amazonaws.com/mini-shop-backend:latest
 
-              for i in {1..10}; do
-                if curl --fail http://localhost:8080/shops; then
+              for i in {1..15}; do
+                if curl --silent --show-error --fail \
+                  http://localhost:8080/shops \
+                  --output /dev/null; then
+                  echo "Deployment successful: /shops returned HTTP 200"
                   exit 0
                 fi
+
+                echo "Waiting for Mini-Shop backend to become ready..."
                 sleep 2
               done
 
