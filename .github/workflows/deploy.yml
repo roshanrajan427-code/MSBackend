@@ -1,0 +1,124 @@
+
+name: Mini-Shop Backend CI/CD
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test-build-deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Run Go tests
+        run: go test ./...
+
+      - name: Build Go application
+        run: go build -o mini-shop-backend .
+
+      - name: Build Docker image
+        run: docker build -t mini-shop-backend:latest .
+
+      - name: Test Docker container
+        run: |
+          docker run -d --name mini-shop-test \
+            -p 18080:8080 \
+            -e AWS_REGION=ap-south-1 \
+            -e S3_BUCKET=test-bucket \
+            -e DATABASE_URL=postgres://test:test@localhost:5432/test \
+            -e JWT_SECRET=test-secret \
+            mini-shop-backend:latest
+
+          for i in {1..10}; do
+            if curl --fail http://localhost:18080/; then
+              exit 0
+            fi
+            sleep 2
+          done
+
+          docker logs mini-shop-test
+          exit 1
+
+      - name: Remove test container
+        if: always()
+        run: docker rm -f mini-shop-test || true
+
+      - name: Configure AWS credentials
+        if: github.event_name == 'push'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+
+      - name: Login to Amazon ECR
+        if: github.event_name == 'push'
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push image to ECR
+        if: github.event_name == 'push'
+        run: |
+          IMAGE_URI=628100075145.dkr.ecr.ap-south-1.amazonaws.com/mini-shop-backend:latest
+          docker tag mini-shop-backend:latest "$IMAGE_URI"
+          docker push "$IMAGE_URI"
+
+      - name: Deploy to Mini-Shop EC2
+        if: github.event_name == 'push'
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/ec2-key.pem
+          chmod 600 ~/.ssh/ec2-key.pem
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+          ssh -i ~/.ssh/ec2-key.pem \
+            -o StrictHostKeyChecking=yes \
+            ubuntu@"$EC2_HOST" << 'EOF'
+              set -e
+
+              cd /home/ubuntu/MSBackend
+
+              aws ecr get-login-password --region ap-south-1 \
+                | sudo docker login --username AWS --password-stdin \
+                  628100075145.dkr.ecr.ap-south-1.amazonaws.com
+
+              sudo docker pull \
+                628100075145.dkr.ecr.ap-south-1.amazonaws.com/mini-shop-backend:latest
+
+              sudo docker rm -f mini-shop-backend || true
+
+              sudo docker run -d \
+                --name mini-shop-backend \
+                --restart unless-stopped \
+                -p 8080:8080 \
+                --env-file /home/ubuntu/MSBackend/.env \
+                628100075145.dkr.ecr.ap-south-1.amazonaws.com/mini-shop-backend:latest
+
+              for i in {1..10}; do
+                if curl --fail http://localhost:8080/; then
+                  exit 0
+                fi
+                sleep 2
+              done
+
+              sudo docker logs mini-shop-backend
+              exit 1
+          EOF
