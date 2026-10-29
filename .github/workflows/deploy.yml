@@ -91,18 +91,24 @@ jobs:
                 --env-file /home/ubuntu/MSBackend/.env \
                 628100075145.dkr.ecr.ap-south-1.amazonaws.com/mini-shop-backend:latest
 
+              HEALTHY=0
+
               for i in {1..15}; do
-                if curl --silent --show-error --fail \
+                if curl --silent --fail \
                   http://localhost:8080/shops \
                   --output /dev/null; then
-                  echo "Deployment successful: /shops returned HTTP 200"
-                  exit 0
+                  HEALTHY=1
+                  break
                 fi
 
                 echo "Waiting for Mini-Shop backend to become ready..."
                 sleep 2
               done
 
-              sudo docker logs mini-shop-backend
-              exit 1
+              if [ "$HEALTHY" -eq 1 ]; then
+                echo "Deployment successful: /shops returned HTTP 200"
+              else
+                sudo docker logs mini-shop-backend
+                exit 1
+              fi
           EOF
