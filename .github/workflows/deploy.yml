@@ -93,7 +93,7 @@ jobs:
                 628100075145.dkr.ecr.ap-south-1.amazonaws.com/mini-shop-backend:latest
 
               for i in {1..10}; do
-                if curl --fail http://localhost:8080/; then
+                if curl --fail http://localhost:8080/shops; then
                   exit 0
                 fi
                 sleep 2
